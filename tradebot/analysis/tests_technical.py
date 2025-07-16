@@ -5,6 +5,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from typing import List, Sequence, Optional
 
+pd.set_option('display.float_format', '{:.6f}'.format)
+
 try:
     from .technical import TechnicalAnalysis
 except ImportError:
@@ -66,50 +68,42 @@ class TechnicalAnalysisTester:
             print(summary.T)
         return summary.to_string()
 
-    def latest_summary(self) -> pd.DataFrame:
-        """Return the newest non-NaN row of indicator values."""
-        latest = self.df[self.indicators].dropna(how="all").iloc[-1]
-        return latest.to_frame("latest_value")
+    def _resolve_column(self, requested: str) -> str:             # FIX: helper
+        """Return the actual column name that matches `requested` (case-insensitive)."""
+        for c in self.df.columns:
+            if c.lower() == requested.lower():
+                return c
+        # fallback: partial match (e.g. "macd" → "macd_12_26_9")
+        matches = [c for c in self.df.columns if requested.lower() in c.lower()]
+        if matches:
+            return matches[0]
+        raise KeyError(f"{requested} not found in DataFrame")
 
-    # ------------------------------------------------------------------
-    # PLOTTING
-    # ------------------------------------------------------------------
-    def plot(
-        self,
-        indicator: str,
-        *,
-        sub_plot: bool = False,
-        price_col: str = "close",
-        figsize: tuple = (12, 6),
-        save: bool = True,
-    ):
-        """Plot `price_col` plus `indicator` and optionally save to disk."""
-        if indicator not in self.df.columns:
-            raise KeyError(f"{indicator} not found in DataFrame")
+    def plot(self, indicator: str, *, sub_plot=False, price_col="close", figsize: tuple = (12, 6), save: bool = True):
+        ind_col  = self._resolve_column(indicator)                # FIX
+        price_col = self._resolve_column(price_col)               # FIX
 
         fig, ax = plt.subplots(figsize=figsize)
         self.df[price_col].plot(ax=ax, lw=1.2, label=price_col.title())
 
-        if sub_plot:
-            ax2 = fig.add_subplot(212, sharex=ax)        # FIX: simpler & clearer twin-panel logic
-            self.df[indicator].plot(ax=ax2, lw=1,
-                                    color="tab:orange",
-                                    label=indicator.upper())
-            ax2.set_ylabel(indicator.upper())
-            ax2.legend(loc="upper right")
-        else:
-            self.df[indicator].plot(ax=ax, lw=1,
-                                    color="tab:red",
-                                    label=indicator.upper())
-
-        ax.set_title(f"{self.ta.symbol} – {indicator.upper()} vs. {price_col.title()}")
-        ax.legend(loc="upper left")
+        target_ax = ax if not sub_plot else fig.add_subplot(212, sharex=ax)
+        self.df[ind_col].plot(ax=target_ax, lw=1,
+                              color="tab:orange" if sub_plot else "tab:red",
+                              label=ind_col.upper())
+        target_ax.set_ylabel(ind_col.upper())
+        target_ax.legend(loc="upper right" if sub_plot else "upper left")
+        ax.set_title(f"{self.ta.symbol} – {ind_col.upper()} vs. {price_col.title()}")
         plt.tight_layout()
-
         if save:
             plt.savefig(os.path.join(self.out_dir,
-                                     f"{self.ta.symbol}_{indicator}.png"))
-        plt.close(fig)                                    # free memory
+                                     f"{self.ta.symbol}_{ind_col}.png"))
+        plt.close(fig)
+
+    def latest_summary(self) -> pd.DataFrame:
+        # FIX: pick the last row that has *any* finite value
+        latest_row = self.df[self.indicators].replace([np.inf, -np.inf], np.nan)
+        latest_row = latest_row.dropna(how="all").iloc[-1:]
+        return latest_row.T.rename(columns={latest_row.index[-1]: "latest_value"})
 
 
 if __name__ == "__main__":
@@ -130,10 +124,12 @@ if __name__ == "__main__":
 
     all_summaries = []
     for label, days in ranges.items():
-        last = tester.df.tail(days)
-        if last.empty:
+        block = tester.df.tail(days)
+        if block.empty:
             continue
-        txt = last[tester.indicators].dropna(how="all").iloc[-1].to_string()
+        last  = block.iloc[-1][tester.indicators]
+        mean  = block.mean(numeric_only=True)[tester.indicators]
+        txt = pd.DataFrame({"last": last, "mean": mean}).to_string()
         all_summaries.append(f"--- {label.upper()} ---\n{txt}\n")
     # Write all summaries to one file
     summary_path = os.path.join(OUT_DIR, f"{ta.symbol}_all_summaries_{today}.txt")

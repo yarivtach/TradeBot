@@ -21,21 +21,33 @@ class TechnicalAnalysis:
     # DATA
     # ------------------------------------------------------------------
     def load_data(self) -> pd.DataFrame:
-        """Download and clean historical OHLCV quotes using yfinance."""
-        try:
-            raw = yf.download(self.symbol,
-                               start=self.start,
-                               interval=self.interval,
-                               auto_adjust=self.auto_adjust)
-            if raw.empty:
-                raise ValueError(f"No data for {self.symbol}")
-            raw = raw.dropna().rename(columns=str.lower)
-            self.data = raw
-            return self.data
-        except Exception as exc:
-            print(f"[TechnicalAnalysis] load_data() → {exc}")
-            self.data = pd.DataFrame()
-            return self.data
+        """
+        Download and clean historical OHLCV quotes using yfinance.
+        Always returns a *single-level* column index:  open, high, low, close, volume
+        """
+        raw = yf.download(self.symbol,
+                          start=self.start,
+                          interval=self.interval,
+                          auto_adjust=self.auto_adjust)
+
+        # ── FLATTEN ──────────────────────────────────────────────────────────
+        if isinstance(raw.columns, pd.MultiIndex):
+            # Decide which level is the price field
+            level0 = raw.columns.get_level_values(0).str.lower()
+            price_names = {"open", "high", "low", "close", "adj close", "volume"}
+            if set(level0[:6]).issubset(price_names):      # ('open', 'tqqq')
+                raw.columns = raw.columns.get_level_values(0)
+            else:                                         # ('tqqq', 'open')
+                raw.columns = raw.columns.get_level_values(1)
+
+        # keep only standard OHLCV columns, drop dividends / splits
+        raw = raw[[c for c in raw.columns
+                   if c.lower() in {"open", "high", "low", "close", "volume"}]]
+
+        raw.columns = raw.columns.str.lower()
+        raw = raw.dropna(how="all")
+        self.data = raw
+        return self.data
 
     # ------------------------------------------------------------------
     # INDICATORS
@@ -46,77 +58,76 @@ class TechnicalAnalysis:
             self.load_data()
         df = self.data.copy()
 
+        # Reference Series explicitly
+        close, high, low, vol = df["close"], df["high"], df["low"], df["volume"]
+
         # --- Moving Averages ------------------------------------------------
         for length in (20, 50, 100, 200):
-            df[f"sma_{length}"] = ta.sma(df.close, length=length)
+            df[f"sma_{length}"] = ta.sma(close, length=length)
 
         for length in (12, 26):
-            df[f"ema_{length}"] = ta.ema(df.close, length=length)
+            df[f"ema_{length}"] = ta.ema(close, length=length)
 
-        df["vwma_20"] = ta.vwma(df.close, df.volume, length=20)
+        df["vwma_20"] = ta.vwma(close, vol, length=20)
 
         # --- MACD -----------------------------------------------------------
-        macd = ta.macd(df.close, fast=12, slow=26, signal=9)
+        macd = ta.macd(close, fast=12, slow=26, signal=9)
         if macd is not None:
-            df = pd.concat([df, macd], axis=1)        # FIX: simpler – keep original names
+            df = pd.concat([df, macd], axis=1)
         else:
             df[["MACD_12_26_9", "MACDh_12_26_9", "MACDs_12_26_9"]] = pd.NA
 
         # --- Oscillators ----------------------------------------------------
-        df["rsi_14"] = ta.rsi(df.close, length=14)
-        stoch = ta.stoch(df.high, df.low, df.close, k=14, d=3)
+        df["rsi_14"] = ta.rsi(close, length=14)
+        stoch = ta.stoch(high, low, close, k=14, d=3)
         if stoch is not None:
             df = pd.concat([df, stoch], axis=1)
-        df["mom_10"] = ta.mom(df.close, length=10)
-        df["roc_10"] = ta.roc(df.close, length=10)
+        df["mom_10"] = ta.mom(close, length=10)
+        df["roc_10"] = ta.roc(close, length=10)
 
         # --- Volatility -----------------------------------------------------
-        bb = ta.bbands(df.close, length=20, std=2)
-        kc = ta.kc(df.high, df.low, df.close, length=20, scalar=2.0)
+        bb = ta.bbands(close, length=20, std=2)
+        kc = ta.kc(high, low, close, length=20, scalar=2.0)
         for tbl in (bb, kc):
             if tbl is not None:
                 df = pd.concat([df, tbl], axis=1)
 
-        df["atr_14"] = ta.atr(df.high, df.low, df.close, length=14)
+        df["atr_14"] = ta.atr(high, low, close, length=14)
 
         # --- Trend strength -------------------------------------------------
-        adx = ta.adx(df.high, df.low, df.close, length=14)
+        adx = ta.adx(high, low, close, length=14)
         if adx is not None:
             df = pd.concat([df, adx], axis=1)
-        df["cci_20"] = ta.cci(df.high, df.low, df.close, length=20)
+        df["cci_20"] = ta.cci(high, low, close, length=20)
 
         # --- Ichimoku Cloud -------------------------------------------------
-        ichi = ta.ichimoku(df.high, df.low, df.close)
+        ichi = ta.ichimoku(high, low, close)
         if isinstance(ichi, tuple):
-            ichi = ichi[0]                            # pandas-ta >=0.3.14 returns tuple
+            ichi = ichi[0]
         if ichi is not None:
             df = pd.concat([df, ichi], axis=1)
 
         # --- Parabolic SAR, Donchian, SuperTrend ---------------------------
         has_cols = all([col in df.columns for col in ["high", "low", "close"]])
-
         def enough_valid(col):
-            # Ensure col is a Series, not a DataFrame
             if col in df.columns and isinstance(df[col], pd.Series):
                 return df[col].notna().sum() >= 2
             return False
-
         enough_high = enough_valid("high")
         enough_low = enough_valid("low")
         enough_close = enough_valid("close")
-
         if has_cols and enough_high and enough_low and enough_close:
-            psar = ta.psar(df.high, df.low, df.close, step=0.02, max_step=0.2)
+            psar = ta.psar(high, low, close, step=0.02, max_step=0.2)
             if psar is not None and "PSARl_0.02_0.2" in psar.columns:
                 df["psar"] = psar["PSARl_0.02_0.2"]
             else:
                 df["psar"] = pd.NA
         else:
             df["psar"] = pd.NA
-        donch = ta.donchian(df.high, df.low, lower_length=20, upper_length=20)
+        donch = ta.donchian(high, low, lower_length=20, upper_length=20)
         if donch is not None:
             df = pd.concat([df, donch], axis=1)
-        st = ta.supertrend(df.high, df.low, df.close, length=10, multiplier=3)
+        st = ta.supertrend(high, low, close, length=10, multiplier=3)
         if st is not None:
             df = pd.concat([df, st], axis=1)
 
@@ -126,7 +137,7 @@ class TechnicalAnalysis:
             isinstance(df["close"], pd.Series) and isinstance(df["volume"], pd.Series) and
             df["close"].notna().sum() > 0 and df["volume"].notna().sum() > 0
         ):
-            df["obv"] = ta.obv(df.close, df.volume)
+            df["obv"] = ta.obv(close, vol)
         else:
             df["obv"] = pd.NA
 
@@ -137,7 +148,7 @@ class TechnicalAnalysis:
             df["high"].notna().sum() > 0 and df["low"].notna().sum() > 0 and
             df["close"].notna().sum() > 0 and df["volume"].notna().sum() > 0
         ):
-            df["cmf_20"] = ta.cmf(df.high, df.low, df.close, df.volume, length=20)
+            df["cmf_20"] = ta.cmf(high, low, close, vol, length=20)
         else:
             df["cmf_20"] = pd.NA
 
@@ -148,16 +159,27 @@ class TechnicalAnalysis:
             df["high"].notna().sum() > 0 and df["low"].notna().sum() > 0 and
             df["close"].notna().sum() > 0 and df["volume"].notna().sum() > 0
         ):
-            df["mfi_14"] = ta.mfi(df.high, df.low, df.close, df.volume, length=14)
+            df["mfi_14"] = ta.mfi(high, low, close, vol, length=14)
         else:
             df["mfi_14"] = pd.NA
 
-        # -------------------------------------------------------------------
-        # Flatten MultiIndex columns if present
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = ['_'.join([str(i) for i in col if i]) for col in df.columns]
-        # Do **not** drop all rows: keep early bars for completeness.
-        df.columns = [str(col) for col in df.columns]
+        # ---------------------------------------------------------------
+        #  AFTER *all* indicators have been concatenated
+        # ---------------------------------------------------------------
+        # FIX: give the most-used signals short, predictable aliases
+        if {"MACD_12_26_9", "MACDs_12_26_9", "MACDh_12_26_9"}.issubset(df.columns):
+            df["macd"]        = df["MACD_12_26_9"]
+            df["macd_signal"] = df["MACDs_12_26_9"]
+            df["macd_hist"]   = df["MACDh_12_26_9"]
+
+        if {"STOCHk_14_3_3", "STOCHd_14_3_3"}.issubset(df.columns):
+            df["stoch_k"] = df["STOCHk_14_3_3"]
+            df["stoch_d"] = df["STOCHd_14_3_3"]
+
+        # FIX: make every column name lower-case for easy look-ups
+        df.columns = [str(c).lower() for c in df.columns]
+
+        # keep early rows but be sure 'close' itself is present
         close_col = next((col for col in df.columns if col.lower() == "close"), None)
         if close_col:
             self.data = df.dropna(how="all", subset=[close_col])
