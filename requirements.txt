@@ -1,0 +1,13 @@
+pandas
+numpy
+scipy
+ta
+pandas_ta
+yfinance
+vectorbt
+scikit-learn
+xgboost
+backtrader
+matplotlib
+mplfinance
+jupyterlab 

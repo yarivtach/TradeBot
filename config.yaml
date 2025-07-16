@@ -1,0 +1,12 @@
+assets:
+  - TQQQ
+  - GEVO
+horizon: daily_swing_weekly  # max holding period: 1 week
+edge:
+  - technical
+  - fundamental
+  - machine_learning
+risk:
+  min_risk: true
+  min_profit_per_trade: 10
+industry_awareness: true 
